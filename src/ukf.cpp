@@ -1,6 +1,8 @@
 #include "ukf.h"
 #include "Eigen/Dense"
 
+#include <iostream>
+
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 
@@ -20,6 +22,8 @@ UKF::UKF() {
   // initial covariance matrix
   P_ = MatrixXd(5, 5);
 
+
+//TODO: tune these parameters
   // Process noise standard deviation longitudinal acceleration in m/s^2
   std_a_ = 30;
 
@@ -54,16 +58,100 @@ UKF::UKF() {
    * TODO: Complete the initialization. See ukf.h for other member properties.
    * Hint: one or more values initialized above might be wildly off...
    */
+
+  // State dimension
+  n_x_ = 5;
+
+  // Augmented state dimension
+  n_aug_ = 7;
+
+  // Sigma point spreading para// Augmented state dimensionmeter
+  lambda_ = 3 - n_aug_;
+
+  //Initialize the covariance matrix P with the identity matrix
+  P_ << 1, 0, 0, 0, 0,
+        0, 1, 0, 0, 0,
+        0, 0, 1, 0, 0,
+        0, 0, 0, 1, 0,
+        0, 0, 0, 0, 1;
+
+  // set weights for the mean and covariance matrix prediction
+  // create vector for weights
+  weights_ = VectorXd(2*n_aug_+1);
+  double weight_0 = lambda_ /(lambda_ + n_aug_);
+  weights_(0) = weight_0;
+  for(int i = 1; i < 2 * n_aug_ + 1; ++i) {
+      weights_(i) = 0.5 / (lambda_ + n_aug_);
+  }
+
+  Xsig_pred_ = MatrixXd(n_x_, 2 * n_aug_ + 1);
+
 }
 
 UKF::~UKF() {}
+
+
+
+
 
 void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
   /**
    * TODO: Complete this function! Make sure you switch between lidar and radar
    * measurements.
    */
+
+  //Initialize the state with the first measurement
+  if(!is_initialized_) {
+
+    //TODO: need to tune v,yaw and yawd
+
+    if(meas_package.sensor_type_ == MeasurementPackage::LASER) {
+      x_ << meas_package.raw_measurements_[0],
+            meas_package.raw_measurements_[1],
+            0,
+            0,
+            0;
+    }
+    else if(meas_package.sensor_type_ == MeasurementPackage::RADAR) {
+      double rho = meas_package.raw_measurements_[0];
+      double phi = meas_package.raw_measurements_[1];
+      //We will not use the velocity measured by the radar because it's speed relative to the ego car and not absolute
+      double rho_dot = meas_package.raw_measurements_[2];
+
+      double p_x = rho * cos(phi);
+      double p_y = rho * sin(phi);
+      x_ << p_x,
+            p_y,
+            0,
+            0,
+            0;
+    }
+
+    time_us_ = meas_package.timestamp_;
+    is_initialized_ = true;
+
+    return;
+  }
+
+  double dt = meas_package.timestamp_ - time_us_;
+  time_us_ = meas_package.timestamp_;
+
+  Prediction(dt);
+
+  if(meas_package.sensor_type_ == MeasurementPackage::LASER && use_laser_) {
+    //std::cout << "LASER " << meas_package.raw_measurements_ << std::endl;
+    UpdateLidar(meas_package);
+  }
+  else if(meas_package.sensor_type_ == MeasurementPackage::RADAR && use_radar_) {
+    //std::cout << "RADAR " << meas_package.raw_measurements_ << std::endl;
+    UpdateRadar(meas_package);
+  }
+  
 }
+
+
+
+
 
 void UKF::Prediction(double delta_t) {
   /**
@@ -71,6 +159,104 @@ void UKF::Prediction(double delta_t) {
    * Modify the state vector, x_. Predict sigma points, the state, 
    * and the state covariance matrix.
    */
+
+  /*** 1. UKF augmentation in order to handle the process noise when generating sigma points ***/
+  //NB : The process noise nu here is not additive because non-linear. Thus, we add it using the UKF augmentation. 
+  // create augmented mean state
+  VectorXd x_aug = VectorXd(n_aug_);
+  x_aug.head(5) = x_;
+  x_aug(5) = 0;
+  x_aug(6) = 0;
+
+  // create augmented covariance matrix
+  MatrixXd P_aug = MatrixXd(n_aug_, n_aug_);
+  P_aug.fill(0.0);
+  P_aug.topLeftCorner(5, 5) = P_;
+  P_aug(5, 5) = std_a_*std_a_;
+  P_aug(6, 6) = std_yawdd_*std_yawdd_;
+  /*******************************************************************************************/
+
+  /*** 2. Sigma points generation ***/
+  MatrixXd Xsig_aug = MatrixXd(n_aug_, 2 * n_aug_ + 1);
+
+  // create square root matrix
+  MatrixXd L = P_aug.llt().matrixL();
+
+  //First column corresponds to the mean
+  Xsig_aug.col(0) = x_aug;
+
+  //Each generated column corresponds to the states of a sigma point
+  for(int i = 0; i < n_aug_; ++i) {
+    Xsig_aug.col(i + 1) = x_aug + sqrt(lambda_ + n_aug_) * L.col(i);
+    Xsig_aug.col(i + n_aug_ + 1) = x_aug - sqrt(lambda_ + n_aug_) * L.col(i);
+  }
+  /*******************************/
+
+  /*** 3. Sigma points prediction ***/
+  for(int i = 0; i < 2 * n_aug_ + 1; ++i) {
+    //Extract values for better readability
+    double p_x = Xsig_aug(0, i);
+    double p_y = Xsig_aug(1, i);
+    double v = Xsig_aug(2, i);
+    double yaw = Xsig_aug(3, i);
+    double yawd = Xsig_aug(4, i);
+    double nu_a = Xsig_aug(5, i);
+    double nu_yawdd = Xsig_aug(6, i);
+
+    //Give the current sigma point to the process model equastd::cout << "TEST" << std::endl;tions 
+    double px_p, py_p;
+
+     // avoid division by zero
+    if (fabs(yawd) > 0.001) {
+        px_p = p_x + v/yawd * ( sin (yaw + yawd*delta_t) - sin(yaw));
+        py_p = p_y + v/yawd * ( cos(yaw) - cos(yaw+yawd*delta_t) );
+    } else {
+        //Case where the car dives in a straight line
+        px_p = p_x + v*delta_t*cos(yaw);
+        py_p = p_y + v*delta_t*sin(yaw);
+    }
+
+    double v_p = v;
+    double yaw_p = yaw + yawd*delta_t;
+    double yawd_p = yawd;
+
+    // add noise
+    px_p = px_p + 0.5*nu_a*delta_t*delta_t * cos(yaw);
+    py_p = py_p + 0.5*nu_a*delta_t*delta_t * sin(yaw);
+    v_p = v_p + nu_a*delta_t;
+    yaw_p = yaw_p + 0.5*nu_yawdd*delta_t*delta_t;
+    yawd_p = yawd_p + nu_yawdd*delta_t;
+
+    // write predicted sigma point into right column
+    Xsig_pred_(0,i) = px_p;
+    Xsig_pred_(1,i) = py_p;
+    Xsig_pred_(2,i) = v_p;
+    Xsig_pred_(3,i) = yaw_p;
+    Xsig_pred_(4,i) = yawd_p;
+  }
+  /******************************/
+
+  /*** 4. Predict the mean and the covariance matrix ***/
+  //Predict state mean
+  VectorXd x_pred = VectorXd(n_x_);
+  x_pred.fill(0.0);
+  for(int i = 0; i < 2 * n_aug_ + 1; ++i) {
+    x_pred = x_pred + weights_(i) * Xsig_pred_.col(i);
+  }
+
+  //Predict state covariance matrix
+  MatrixXd P_pred = MatrixXd(n_x_, n_x_);
+  P_pred.fill(0.0);
+  for(int i = 0; i < 2 * n_aug_ + 1; ++i) {
+    VectorXd x_diff = Xsig_pred_.col(i) - x_pred;
+    NormalizeAngle(x_diff); //TODO BUG HERE ???? Replace by if-else ?
+
+    P_pred = P_pred + weights_(i) * x_diff * x_diff.transpose();
+  }
+  /******************************************************/
+  //std::cout << delta_t << std::endl;
+  x_ = x_pred;
+  P_ = P_pred;
 }
 
 void UKF::UpdateLidar(MeasurementPackage meas_package) {
@@ -89,4 +275,9 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
    * covariance, P_.
    * You can also calculate the radar NIS, if desired.
    */
+}
+
+void UKF::NormalizeAngle(Eigen::VectorXd &state_vector) {
+  while (state_vector(3)> M_PI) state_vector(3)-=2.*M_PI;
+  while (state_vector(3)<-M_PI) state_vector(3)+=2.*M_PI;
 }
