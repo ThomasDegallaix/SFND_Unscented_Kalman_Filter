@@ -45,7 +45,7 @@ class UKF {
    * Normalize the yaw angle to be in the range [-PI,PI]
    * @param double Angle to be normalized
    */
-  void NormalizeAngle(Eigen::VectorXd &state_vector);
+  void NormalizeAngle(double* angle);
 
 
   // initially set to false, set to true in first call of ProcessMeasurement

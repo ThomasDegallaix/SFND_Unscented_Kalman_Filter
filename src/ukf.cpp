@@ -25,10 +25,10 @@ UKF::UKF() {
 
 //TODO: tune these parameters
   // Process noise standard deviation longitudinal acceleration in m/s^2
-  std_a_ = 30;
+  std_a_ = 1.5;
 
   // Process noise standard deviation yaw acceleration in rad/s^2
-  std_yawdd_ = 30;
+  std_yawdd_ = 3;
   
   /**
    * DO NOT MODIFY measurement noise values below.
@@ -133,17 +133,15 @@ void UKF::ProcessMeasurement(MeasurementPackage meas_package) {
     return;
   }
 
-  double dt = meas_package.timestamp_ - time_us_;
+  double dt = (meas_package.timestamp_ - time_us_) / 1000000.0; //µs -> s
   time_us_ = meas_package.timestamp_;
 
   Prediction(dt);
 
   if(meas_package.sensor_type_ == MeasurementPackage::LASER && use_laser_) {
-    //std::cout << "LASER " << meas_package.raw_measurements_ << std::endl;
     UpdateLidar(meas_package);
   }
   else if(meas_package.sensor_type_ == MeasurementPackage::RADAR && use_radar_) {
-    //std::cout << "RADAR " << meas_package.raw_measurements_ << std::endl;
     UpdateRadar(meas_package);
   }
   
@@ -203,7 +201,7 @@ void UKF::Prediction(double delta_t) {
     double nu_a = Xsig_aug(5, i);
     double nu_yawdd = Xsig_aug(6, i);
 
-    //Give the current sigma point to the process model equastd::cout << "TEST" << std::endl;tions 
+    //Give the current sigma point to the process model equations 
     double px_p, py_p;
 
      // avoid division by zero
@@ -249,12 +247,12 @@ void UKF::Prediction(double delta_t) {
   P_pred.fill(0.0);
   for(int i = 0; i < 2 * n_aug_ + 1; ++i) {
     VectorXd x_diff = Xsig_pred_.col(i) - x_pred;
-    NormalizeAngle(x_diff); //TODO BUG HERE ???? Replace by if-else ?
+    NormalizeAngle(&x_diff(3));
 
     P_pred = P_pred + weights_(i) * x_diff * x_diff.transpose();
   }
   /******************************************************/
-  //std::cout << delta_t << std::endl;
+
   x_ = x_pred;
   P_ = P_pred;
 }
@@ -275,9 +273,88 @@ void UKF::UpdateRadar(MeasurementPackage meas_package) {
    * covariance, P_.
    * You can also calculate the radar NIS, if desired.
    */
+
+  //Transform sigma points into measurement space using the measurement model
+  MatrixXd Zsig = MatrixXd(3, 2 * n_aug_ + 1);
+  Zsig.fill(0.0);
+  for(int i = 0; i < 2 * n_aug_ + 1; ++i) {
+    double p_x = Xsig_pred_(0,i);
+    double p_y = Xsig_pred_(1,i);
+    double v = Xsig_pred_(2,i);
+    double yaw = Xsig_pred_(3,i);
+
+    double v_x = v*cos(yaw);
+    double v_y = v*sin(yaw);
+
+    //Measurement model equations
+    Zsig(0,i) = sqrt(p_x*p_x + p_y*p_y);                      //rho
+    Zsig(1,i) = atan2(p_y,p_x);                               //Phi
+    Zsig(2,i) = (p_x*v_x + p_y*v_y)/sqrt(p_x*p_x + p_y*p_y);  //rho_dot
+  }
+
+  //Predict measurement mean
+  int n_z = 3;
+  VectorXd z_pred = VectorXd(n_z);
+  z_pred.fill(0.0);
+  for(int i = 0; i < 2 * n_aug_ +1; ++i) {
+    z_pred = z_pred + weights_(i) * Zsig.col(i);
+  }
+
+  //Calculate innovation measurement covariance matrix
+  MatrixXd S = MatrixXd(n_z,n_z);
+  S.fill(0.0);
+  for(int i  = 0; i < 2 * n_aug_ + 1; ++i) {
+    VectorXd z_diff = Zsig.col(i) - z_pred;
+    NormalizeAngle(&z_diff(1));
+
+    S = S + weights_(i) * z_diff * z_diff.transpose();
+  }
+
+  //Add measurement noise covariance matrix (Additive here because not non-linear so no need to to UKF augmentation)
+  MatrixXd R = MatrixXd(n_z,n_z);
+  R.fill(0.0);
+  R(0,0) = std_radr_*std_radr_;
+  R(1,1) = std_radphi_*std_radphi_;
+  R(2,2) = std_radrd_*std_radrd_;
+
+  S = S + R;
+
+  //Calculate cross-correlation matrix
+  MatrixXd Tc = MatrixXd(n_x_,n_z);
+  Tc.fill(0.0);
+  for(int i = 0; i < 2 * n_aug_ + 1; ++i) {
+    //Residual
+    VectorXd z_diff = Zsig.col(i) - z_pred;
+    //Angle normalization
+    NormalizeAngle(&z_diff(1));
+
+    // state difference
+    VectorXd x_diff = Xsig_pred_.col(i) - x_;
+    // angle normalization
+    NormalizeAngle(&x_diff(3));
+
+    Tc = Tc + weights_(i) * x_diff * z_diff.transpose();
+  }
+  
+
+  //Calculate Kalman gain
+  MatrixXd K = Tc * S.inverse();
+
+  //Residual
+  VectorXd z_diff = meas_package.raw_measurements_ - z_pred;
+  NormalizeAngle(&z_diff(1));
+
+  //State update
+  x_ = x_ + K * z_diff;
+
+  //State covariance matrix update
+  P_ = P_ - K * S * K.transpose();
+
+
+  //TODO: calculate and display NIS
 }
 
-void UKF::NormalizeAngle(Eigen::VectorXd &state_vector) {
-  while (state_vector(3)> M_PI) state_vector(3)-=2.*M_PI;
-  while (state_vector(3)<-M_PI) state_vector(3)+=2.*M_PI;
+void UKF::NormalizeAngle(double* angle) {
+  while (*angle> M_PI) *angle-=2.*M_PI;
+  while (*angle<-M_PI) *angle+=2.*M_PI;
 }
